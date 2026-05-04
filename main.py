@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Header, Response
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import base64
 import fitz  # PyMuPDF
 import io
@@ -25,6 +25,27 @@ def health():
     return {"status": "ok"}
 
 
+def box_to_rect(box: Dict[str, Any]) -> fitz.Rect:
+    x = float(box.get("x", 0))
+    y = float(box.get("y", 0))
+    width = float(box.get("width", 0))
+    height = float(box.get("height", 0))
+    return fitz.Rect(x, y, x + width, y + height)
+
+
+def insert_text(page, rect, text, fontsize=8):
+    if not text:
+        return
+
+    page.insert_textbox(
+        rect,
+        str(text),
+        fontsize=fontsize,
+        fontname="helv",
+        color=(0, 0, 0)
+    )
+
+
 @app.post("/render")
 def render_pdf(
     req: RenderRequest,
@@ -43,28 +64,28 @@ def render_pdf(
     try:
         doc = fitz.open(stream=source_pdf_bytes, filetype="pdf")
 
+        if len(doc) == 0:
+            raise HTTPException(status_code=400, detail="PDF has no pages")
+
+        page = doc[0]
+
         for item in req.ocr.get("items", []):
-            page_index = int(item.get("page", 1)) - 1
+            label = item.get("label", {})
+            value = item.get("value", {})
 
-            if page_index < 0 or page_index >= len(doc):
-                continue
+            label_text = label.get("value", "")
+            value_text = value.get("value", "")
 
-            bbox = item.get("bbox")
-            if not bbox or len(bbox) != 4:
-                continue
+            label_box = label.get("boundingBox", {})
+            value_box = value.get("boundingBox", {})
 
-            page = doc[page_index]
-            rect = fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
+            if label_box:
+                label_rect = box_to_rect(label_box)
+                insert_text(page, label_rect, label_text, fontsize=7)
 
-            text = item.get("translatedText") or item.get("text") or ""
-
-            page.insert_textbox(
-                rect,
-                text,
-                fontsize=8,
-                fontname="helv",
-                color=(0, 0, 0)
-            )
+            if value_box:
+                value_rect = box_to_rect(value_box)
+                insert_text(page, value_rect, value_text, fontsize=9)
 
         output = io.BytesIO()
         doc.save(output)
@@ -79,5 +100,7 @@ def render_pdf(
             }
         )
 
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=500, detail="PDF rendering failed")
